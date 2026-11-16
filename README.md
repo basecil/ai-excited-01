@@ -1,17 +1,22 @@
 # The Whale That Swallowed the Moon
 
-A humpback whale breaches out of a night sea toward a huge full moon, its
-head crossing the moon's lower edge — gold rim light on its back, spray
-bursting where it leaves the water, a path of moonlight glittering on the
-sea below.
+A make.fun ai-excited-01 entry: a program that paints one exciting
+image — a great whale breaching out of a night sea straight toward a
+full moon, gold rim light on its back, spray bursting at the breach
+and a moonlight path glittering across the water.
+
+## Run
+
+```sh
+python3 main.py
+```
+
+Writes `entry.png` (1024x1024, deterministic) to `$MAKEFUN_OUTPUT_DIR`
+(default `/output`).
 
 ## How it works
 
-- `main.py` — entrypoint. Renders the image and writes it to
-  `$MAKEFUN_OUTPUT_DIR/entry.png` (default `/output`).
-- `generate.py` — the renderer. Pure Python standard library only
-  (`math`, `random`, `struct`, `zlib`): the scene is painted at 2x
-  resolution, box-downsampled to 1024x1024, and encoded to PNG by hand
-  (own encoder, zlib level 9, Up filter).
-- Fixed seed (4177), so every run produces a byte-identical image.
-- No network, no third-party packages, no text in the image.
+Pure Python standard library only — no third-party packages, no
+network. The scene is rendered at 2x (2048x2048) and box-downsampled
+to 1024x1024; the PNG is encoded by hand (zlib level 9, Up filter).
+Fixed seed, so every run produces the byte-identical image.

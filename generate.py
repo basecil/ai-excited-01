@@ -1,12 +1,9 @@
-"""Renderer for "The Whale That Swallowed the Moon".
+"""The Whale That Swallowed the Moon — pure-stdlib renderer.
 
-Pure standard library (math / random / struct / zlib) — the grader runs
-with nothing installed. The scene is painted at 2x resolution and box
-downsampled to 1024x1024, then encoded to PNG by hand.
-
-Scene: a humpback breaches out of a night sea toward a huge full moon,
-its head crossing the moon's lower edge, gold rim light on its back,
-spray bursting where it leaves the water, a path of moonlight on the sea.
+Draws the scene at 2x (2048x2048), box-downsamples to 1024x1024 and
+encodes a PNG with a hand-rolled encoder (zlib level 9, Up filter).
+Standard library only: math, random, struct, zlib.
+Deterministic: fixed seed 4177, no wall-clock or environment input.
 """
 
 import math
@@ -15,303 +12,344 @@ import struct
 import zlib
 
 SEED = 4177
-SS = 2  # supersample factor
+S = 2  # supersample factor
 W, H = 1024, 1024
-SW, SH = W * SS, H * SS
+W2, H2 = W * S, H * S
+HORIZON = 640 * S
 
-# --- palette (final-pixel coordinates unless noted) -------------------------
 SKY_TOP = (2, 6, 23)
 SKY_HORIZON = (11, 30, 58)
 SEA_TOP = (13, 27, 51)
 SEA_BOTTOM = (4, 7, 15)
 MOON_CORE = (255, 251, 232)
 MOON_EDGE = (238, 214, 136)
-MOON_X, MOON_Y, MOON_R = 660, 270, 165
-HORIZON = 640
-BODY = (36, 62, 108)        # whale, above the waterline
-BODY_DARK = (32, 54, 92)    # whale, submerged part
-BELLY = (120, 150, 195)     # pale belly patch
-RIM = (255, 212, 118)       # gold rim light
-RIM_DARK = (120, 92, 44)    # rim light under water
-FIN = (27, 47, 85)
-SPRAY = (228, 239, 250)
-FOAM = (212, 227, 243)
-GOLD = (255, 203, 100)
-
-# Whale spine: quadratic bezier, tail -> control -> head.
-TAIL = (360.0, 720.0)
-CTRL = (330.0, 480.0)
-HEAD = (628.0, 352.0)
+MOON_GLOW = (255, 222, 150)
+MOON_X, MOON_Y, MOON_R = 660 * S, 270 * S, 165 * S
+BODY = (18, 32, 58)
+BELLY = (52, 74, 108)
+RIM = (255, 210, 130)
+FOAM = (232, 240, 250)
 
 
-def mix(c1, c2, t):
-    """Linear blend between two RGB colors."""
+def _lerp(a, b, t):
     return (
-        int(c1[0] + (c2[0] - c1[0]) * t),
-        int(c1[1] + (c2[1] - c1[1]) * t),
-        int(c1[2] + (c2[2] - c1[2]) * t),
+        int(a[0] + (b[0] - a[0]) * t),
+        int(a[1] + (b[1] - a[1]) * t),
+        int(a[2] + (b[2] - a[2]) * t),
     )
 
 
-def bezier(t):
+def _bytes(rgb):
+    return bytes((rgb[0] & 255, rgb[1] & 255, rgb[2] & 255))
+
+
+def _circle(buf, cx, cy, r, rgb):
+    """Fill a solid circle into the RGB bytearray buffer (2x coords)."""
+    if r <= 0:
+        return
+    paint = _bytes(rgb)
+    r2 = r * r
+    y0 = cy - r
+    if y0 < 0:
+        y0 = 0
+    y1 = cy + r
+    if y1 > H2 - 1:
+        y1 = H2 - 1
+    for y in range(y0, y1 + 1):
+        dy = y - cy
+        dx = int(math.sqrt(r2 - dy * dy))
+        x0 = cx - dx
+        if x0 < 0:
+            x0 = 0
+        x1 = cx + dx
+        if x1 > W2 - 1:
+            x1 = W2 - 1
+        n = x1 - x0 + 1
+        if n > 0:
+            i = (y * W2 + x0) * 3
+            buf[i:i + n * 3] = paint * n
+
+
+def _rect(buf, x0, y0, x1, y1, rgb):
+    """Fill an axis-aligned rectangle (2x coords, inclusive)."""
+    paint = _bytes(rgb)
+    if x0 < 0:
+        x0 = 0
+    if y0 < 0:
+        y0 = 0
+    if x1 > W2 - 1:
+        x1 = W2 - 1
+    if y1 > H2 - 1:
+        y1 = H2 - 1
+    n = x1 - x0 + 1
+    if n <= 0 or y1 < y0:
+        return
+    row = paint * n
+    for y in range(y0, y1 + 1):
+        i = (y * W2 + x0) * 3
+        buf[i:i + n * 3] = row
+
+
+def _polygon(buf, pts, rgb):
+    """Even-odd scanline polygon fill (2x coords)."""
+    paint = _bytes(rgb)
+    ys = [p[1] for p in pts]
+    y0 = min(ys)
+    if y0 < 0:
+        y0 = 0
+    y1 = max(ys)
+    if y1 > H2 - 1:
+        y1 = H2 - 1
+    n = len(pts)
+    for y in range(y0, y1 + 1):
+        xs = []
+        for i in range(n):
+            x1, yy1 = pts[i]
+            x2, yy2 = pts[(i + 1) % n]
+            if (yy1 <= y < yy2) or (yy2 <= y < yy1):
+                t = (y - yy1) / (yy2 - yy1)
+                xs.append(x1 + t * (x2 - x1))
+        xs.sort()
+        for k in range(0, len(xs) - 1, 2):
+            x0 = int(math.ceil(xs[k]))
+            if x0 < 0:
+                x0 = 0
+            x1 = int(xs[k + 1])
+            if x1 > W2 - 1:
+                x1 = W2 - 1
+            m = x1 - x0 + 1
+            if m > 0:
+                i = (y * W2 + x0) * 3
+                buf[i:i + m * 3] = paint * m
+
+
+def _bezier(t):
+    """Quadratic bezier spine: tail (360,720) -> ctrl (330,480) -> head (628,352)."""
     u = 1.0 - t
-    return (
-        u * u * TAIL[0] + 2.0 * u * t * CTRL[0] + t * t * HEAD[0],
-        u * u * TAIL[1] + 2.0 * u * t * CTRL[1] + t * t * HEAD[1],
-    )
+    x = u * u * 360 + 2 * u * t * 330 + t * t * 628
+    y = u * u * 720 + 2 * u * t * 480 + t * t * 352
+    return x, y
 
 
-def body_radius(t):
-    """Radius profile: 18 at the tail, 95 mid-body, 44 at the head."""
-    if t <= 0.55:
-        return 18.0 + 77.0 * (t / 0.55) ** 0.8
-    return 95.0 - 51.0 * ((t - 0.55) / 0.45) ** 1.1
+def _radius(t):
+    """Body radius profile (final px): 18 -> 95 -> 44, smooth."""
+    pts = [(0.0, 18.0), (0.3, 70.0), (0.55, 95.0), (0.8, 80.0), (1.0, 44.0)]
+    for i in range(len(pts) - 1):
+        t0, r0 = pts[i]
+        t1, r1 = pts[i + 1]
+        if t0 <= t <= t1:
+            f = (t - t0) / (t1 - t0)
+            f = (1.0 - math.cos(f * math.pi)) / 2.0
+            return r0 + (r1 - r0) * f
+    return pts[-1][1]
 
 
-class Canvas:
-    """RGB bytearray canvas, drawn in final coordinates, stored at 2x."""
-
-    def __init__(self):
-        self.buf = bytearray(SW * SH * 3)
-
-    def _row_fill(self, sy, x0, x1, color):
-        """Fill supersampled row `sy` between pixel columns x0..x1."""
-        if x0 >= x1:
-            return
-        start = (sy * SW + x0) * 3
-        self.buf[start:start + (x1 - x0) * 3] = bytes(color) * (x1 - x0)
-
-    def fill_rect(self, x0, y0, x1, y1, color):
-        sx0 = max(0, int(x0 * SS))
-        sx1 = min(SW, int(x1 * SS))
-        sy0 = max(0, int(y0 * SS))
-        sy1 = min(SH, int(y1 * SS))
-        for sy in range(sy0, sy1):
-            self._row_fill(sy, sx0, sx1, color)
-
-    def fill_circle(self, cx, cy, r, color):
-        scx, scy, sr = cx * SS, cy * SS, r * SS
-        sy0 = max(0, int(scy - sr))
-        sy1 = min(SH, int(scy + sr) + 1)
-        r2 = sr * sr
-        for sy in range(sy0, sy1):
-            dy = (sy + 0.5) - scy
-            rem = r2 - dy * dy
-            if rem <= 0:
-                continue
-            dx = math.sqrt(rem)
-            x0 = max(0, int(scx - dx))
-            x1 = min(SW, int(scx + dx) + 1)
-            self._row_fill(sy, x0, x1, color)
-
-    def fill_poly(self, points, color):
-        """Scanline polygon fill (final coordinates)."""
-        pts = [(x * SS, y * SS) for x, y in points]
-        ys = [p[1] for p in pts]
-        sy0 = max(0, int(min(ys)))
-        sy1 = min(SH, int(max(ys)) + 1)
-        n = len(pts)
-        for sy in range(sy0, sy1):
-            y = sy + 0.5
-            xs = []
-            for i in range(n):
-                x1, y1 = pts[i]
-                x2, y2 = pts[(i + 1) % n]
-                if (y1 <= y < y2) or (y2 <= y < y1):
-                    xs.append(x1 + (y - y1) * (x2 - x1) / (y2 - y1))
-            xs.sort()
-            for j in range(0, len(xs) - 1, 2):
-                self._row_fill(sy, max(0, int(xs[j])),
-                               min(SW, int(xs[j + 1]) + 1), color)
+def _sky_and_sea(buf):
+    for y in range(0, HORIZON):
+        c = _lerp(SKY_TOP, SKY_HORIZON, y / HORIZON)
+        i = y * W2 * 3
+        buf[i:i + W2 * 3] = _bytes(c) * W2
+    sea_h = H2 - HORIZON
+    for y in range(HORIZON, H2):
+        c = _lerp(SEA_TOP, SEA_BOTTOM, (y - HORIZON) / sea_h)
+        i = y * W2 * 3
+        buf[i:i + W2 * 3] = _bytes(c) * W2
 
 
-def paint_sky_sea(cv):
-    for sy in range(SH):
-        y = sy / SS
-        if y < HORIZON:
-            c = mix(SKY_TOP, SKY_HORIZON, y / HORIZON)
+def _stars(buf, rng):
+    clear = (165 + 40) * S
+    placed = 0
+    guard = 0
+    while placed < 280 and guard < 4000:
+        guard += 1
+        x = rng.randrange(0, W2)
+        y = rng.randrange(0, HORIZON - 20 * S)
+        dx = x - MOON_X
+        dy = y - MOON_Y
+        if dx * dx + dy * dy < clear * clear:
+            continue
+        b = rng.random()
+        if b < 0.7:
+            col = (200, 210, 235)
+            r = 1
+        elif b < 0.95:
+            col = (230, 235, 250)
+            r = 2
         else:
-            c = mix(SEA_TOP, SEA_BOTTOM, (y - HORIZON) / (H - HORIZON))
-        cv._row_fill(sy, 0, SW, c)
+            col = (255, 250, 235)
+            r = 3
+        _circle(buf, x, y, r, col)
+        placed += 1
 
 
-def paint_stars(cv, rng):
-    for _ in range(280):
-        x = rng.uniform(0, W)
-        y = rng.uniform(0, 615)
-        if math.hypot(x - MOON_X, y - MOON_Y) < 205:
-            continue  # clear zone around the moon
-        roll = rng.random()
-        if roll < 0.12:
-            r, c = 2.2, (255, 255, 255)
-        elif roll < 0.4:
-            r, c = 1.5, (222, 232, 248)
-        else:
-            r, c = 1.0, (190, 205, 230)
-        cv.fill_circle(x, y, r, c)
-
-
-def paint_moon(cv, rng):
-    sky_here = mix(SKY_TOP, SKY_HORIZON, MOON_Y / HORIZON)
-    # 36-ring glow halo, faintest ring outermost.
-    for i in range(36, 0, -1):
-        t = (36 - i) / 35.0
-        cv.fill_circle(MOON_X, MOON_Y, MOON_R + i * 2.5,
-                       mix(sky_here, MOON_EDGE, 0.03 + 0.30 * t))
-    # Disc: concentric rings, edge color outside, pale core inside.
-    steps = 24
-    for i in range(steps, -1, -1):
-        r = MOON_R * (i + 1) / (steps + 1)
-        cv.fill_circle(MOON_X, MOON_Y, r,
-                       mix(MOON_EDGE, MOON_CORE, 1.0 - r / (MOON_R + 1)))
-    # 16 craters.
+def _moon(buf, rng):
+    sky_mid = _lerp(SKY_TOP, SKY_HORIZON, 270 / 640)
+    # 36-ring glow halo, outermost (faintest) first.
+    outer = int(MOON_R * 1.6)
+    for i in range(36):
+        f = i / 35.0  # 0 outer -> 1 inner
+        r = int(outer + (MOON_R - outer) * f)
+        alpha = 0.008 + 0.30 * (f * f * f)
+        _circle(buf, MOON_X, MOON_Y, r, _lerp(sky_mid, MOON_GLOW, alpha))
+    # Moon disc: rings from edge colour to bright core.
+    for i in range(20):
+        f = i / 19.0  # 0 edge -> 1 core
+        r = int(MOON_R * (1.0 - f) + 4)
+        _circle(buf, MOON_X, MOON_Y, r, _lerp(MOON_EDGE, MOON_CORE, f * f))
+    # 16 craters, slightly darker than the disc.
     for _ in range(16):
-        while True:
-            x = rng.uniform(MOON_X - 140, MOON_X + 140)
-            y = rng.uniform(MOON_Y - 140, MOON_Y + 140)
-            if math.hypot(x - MOON_X, y - MOON_Y) < 135:
-                break
-        cv.fill_circle(x, y, rng.uniform(4, 14), (206, 186, 116))
+        ang = rng.uniform(0.0, 2.0 * math.pi)
+        dist = math.sqrt(rng.random()) * MOON_R * 0.78
+        cx = int(MOON_X + math.cos(ang) * dist)
+        cy = int(MOON_Y + math.sin(ang) * dist)
+        cr = int(rng.uniform(6, 20) * S)
+        _circle(buf, cx, cy, cr, (216, 196, 132))
 
 
-def paint_moon_path(cv, rng):
-    def half_width(y):
-        d = (y - HORIZON) / (H - HORIZON)
-        return 30.0 + 130.0 * d
-
-    # 8 gold strips, widening with depth.
-    for y in (660, 700, 745, 795, 850, 905, 960, 1005):
-        hw = half_width(y) * 0.85
-        x = MOON_X - hw + rng.uniform(-10, 10)
-        end = MOON_X + hw
-        while x < end:
-            seg = rng.uniform(18, 60)
-            cv.fill_rect(x, y, min(x + seg, end), y + rng.uniform(4, 8),
-                         (200, 158, 70))
-            x += seg + rng.uniform(8, 30)
-    # 420 sparkle dashes inside the wedge.
+def _moonlight_path(buf, rng):
+    # 8 gold strips on the sea, widening with depth.
+    for i in range(8):
+        y_top = (655 + i * 46) * S
+        height = int(rng.uniform(10, 18) * S)
+        width = int((70 + i * 30) * S)
+        cx = 660 * S + int(rng.uniform(-14, 14) * S)
+        sea = _lerp(SEA_TOP, SEA_BOTTOM, (y_top // S - 640) / 384)
+        col = _lerp(sea, (255, 220, 150), 0.38)
+        _rect(buf, cx - width // 2, y_top, cx + width // 2, y_top + height, col)
+    # 420 sparkle dashes.
     for _ in range(420):
-        y = rng.uniform(HORIZON + 5, H - 4)
-        hw = half_width(y)
-        x = rng.uniform(MOON_X - hw, MOON_X + hw)
-        cv.fill_rect(x, y, x + rng.uniform(2, 7), y + rng.uniform(1, 2),
-                     (255, 214, 120) if rng.random() < 0.5 else (232, 190, 92))
+        y = rng.randrange(645 * S, H2 - 4)
+        depth = (y // S - 640) / 384.0
+        spread = int((30 + depth * 150) * S)
+        x = int(660 * S + rng.gauss(0, max(8, spread // 2)))
+        w = int(rng.uniform(3, 16) * S)
+        h = max(1, int(rng.uniform(1, 3) * S))
+        sea = _lerp(SEA_TOP, SEA_BOTTOM, depth)
+        col = _lerp(sea, (255, 232, 165), rng.uniform(0.3, 0.85))
+        _rect(buf, x - w // 2, y, x + w // 2, y + h, col)
 
 
-def paint_whale(cv, rng):
-    spine = [(bezier(i / 28.0), body_radius(i / 28.0)) for i in range(29)]
+def _whale(buf, rng):
+    spine = []
+    for i in range(29):
+        t = i / 28.0
+        x, y = _bezier(t)
+        spine.append((x * S, y * S, _radius(t) * S))
+    # Gold rim light: same body shifted toward the moon, drawn first.
+    for (x, y, r) in spine:
+        _circle(buf, int(x + 17 * S), int(y - 13 * S), int(r), RIM)
+    # Body.
+    for (x, y, r) in spine:
+        _circle(buf, int(x), int(y), int(r), BODY)
+    # Belly: lighter patch, circles inside the body on the lower side.
+    for i in range(7, 25):
+        x, y, r = spine[i]
+        _circle(buf, int(x), int(y + r * 0.35), int(r * 0.55), BELLY)
+    # Flukes: concave fan at the tail; gold edge traced along the top.
+    base = [(x * S, y * S) for (x, y) in [
+        (320, 750), (272, 672), (300, 700), (340, 702), (362, 694),
+        (385, 700), (420, 692), (448, 660), (410, 748),
+    ]]
+    _polygon(buf, base, BODY)
+    edge = [(272, 672), (300, 700), (340, 702), (362, 694),
+            (385, 700), (420, 692), (448, 660)]
+    for i in range(len(edge) - 1):
+        x0, y0 = edge[i]
+        x1, y1 = edge[i + 1]
+        steps = max(2, int(math.hypot(x1 - x0, y1 - y0) / 4))
+        for k in range(steps + 1):
+            t = k / steps
+            _circle(buf, int((x0 + (x1 - x0) * t) * S),
+                    int((y0 + (y1 - y0) * t) * S), 3 * S, RIM)
+    # Pectoral fin: tapered polygon on the lower body.
+    fin = [(x * S, y * S) for (x, y) in [
+        (440, 470), (495, 445), (530, 520), (490, 548), (460, 530),
+    ]]
+    _polygon(buf, fin, BODY)
+    # Eye: pale dot + dark pupil at the head.
+    _circle(buf, 646 * S, 336 * S, 7 * S, (240, 240, 230))
+    _circle(buf, 646 * S, 336 * S, 3 * S + 1, (10, 14, 24))
 
-    # Gold rim: same body shifted up-right, drawn first.
-    for (x, y), r in spine:
-        rim = RIM if y <= HORIZON else RIM_DARK
-        cv.fill_circle(x + 17, y - 13, r, rim)
-    # Body, two-tone across the waterline.
-    for (x, y), r in spine:
-        cv.fill_circle(x, y, r, BODY if y <= HORIZON else BODY_DARK)
-    # Belly: smaller circles hugging the lower side of the body.
-    for i in range(9, 23):
-        (x, y), r = spine[i]
-        cv.fill_circle(x, y + r * 0.30, r * 0.42, BELLY)
 
-    # Flukes: concave polygon at the tail, gold rim on the top edge.
-    flukes = [(280, 690), (330, 706), (360, 716), (390, 706), (440, 690),
-              (405, 672), (360, 684), (315, 672)]
-    gold = [(x, y - 3) for x, y in flukes]
-    cv.fill_poly(gold, RIM_DARK)
-    cv.fill_poly(flukes, BODY_DARK)
-
-    # Pectoral fin: tapered polygon on the body's lower side.
-    cv.fill_poly([(375, 545), (330, 620), (312, 668), (360, 650),
-                  (415, 590)], FIN)
-
-    # Eye: pale dot + dark pupil on the head.
-    cv.fill_circle(612, 332, 7, (235, 240, 248))
-    cv.fill_circle(612, 332, 3.5, (8, 12, 24))
-
-
-def paint_spray_foam(cv, rng):
-    bx, by = 360.0, HORIZON  # breach point
-    # 320 droplets in an upward fan at the breach.
+def _spray_and_foam(buf, rng):
+    # 320 droplets in an upward fan at the breach (waterline near the tail).
+        # base in 2x coords: (365, 640) final
+    bx, by = 365 * S, 640 * S
     for _ in range(320):
-        ang = math.radians(rng.uniform(-165, -15))
-        dist = rng.uniform(8, 190) * rng.random() ** 0.5
-        x = bx + math.cos(ang) * dist
-        y = by + math.sin(ang) * dist + dist * dist * 0.0016
-        cv.fill_circle(x, y, rng.uniform(1.0, 3.0), SPRAY)
-    # 70 sheeting droplets along the trailing edge near the waterline.
+        ang = rng.uniform(-160.0, -20.0) * math.pi / 180.0
+        dist = rng.uniform(6, 140) * S
+        x = int(bx + math.cos(ang) * dist)
+        y = int(by + math.sin(ang) * dist)
+        r = max(1, int(rng.uniform(1, 4) * S))
+        col = (240, 245, 255) if rng.random() < 0.8 else (200, 220, 245)
+        _circle(buf, x, y, r, col)
+    # 70 sheeting droplets on the trailing (lower-left) edge of the body.
     for _ in range(70):
-        t = rng.uniform(0.05, 0.35)
-        (x, y), r = bezier(t), body_radius(t)
-        x += rng.uniform(-r - 22, -r - 4)
-        y += rng.uniform(-14, 26)
-        cv.fill_circle(x, y, rng.uniform(1.0, 2.5), SPRAY)
+        t = rng.uniform(0.05, 0.5)
+        x, y = _bezier(t)
+        r = _radius(t)
+        off = r + rng.uniform(5, 25)
+        px = int((x - off * 0.8) * S)
+        py = int((y + off * 0.6) * S)
+        _circle(buf, px, py, max(1, int(rng.uniform(1, 3) * S)), (235, 242, 252))
     # 30 foam blobs at the waterline.
     for _ in range(30):
-        cv.fill_circle(rng.uniform(290, 440), rng.uniform(632, 652),
-                       rng.uniform(2, 7), FOAM)
+        x = int(rng.uniform(300, 430) * S)
+        y = int(rng.uniform(630, 652) * S)
+        _circle(buf, x, y, int(rng.uniform(4, 12) * S), FOAM)
 
 
-def downsample(buf):
-    """Box-average the 2x buffer down to 1024x1024."""
+def _downsample(buf):
     out = bytearray(W * H * 3)
-    sw3 = SW * 3
     for y in range(H):
-        base0 = (2 * y) * sw3
-        base1 = base0 + sw3
+        r0 = (2 * y) * W2 * 3
+        r1 = (2 * y + 1) * W2 * 3
         o = y * W * 3
         for x in range(W):
-            i0 = base0 + x * 6
-            i1 = base1 + x * 6
+            i0 = r0 + x * 6
+            i1 = r1 + x * 6
             out[o] = (buf[i0] + buf[i0 + 3] + buf[i1] + buf[i1 + 3] + 2) >> 2
-            out[o + 1] = (buf[i0 + 1] + buf[i0 + 4] + buf[i1 + 1]
-                          + buf[i1 + 4] + 2) >> 2
-            out[o + 2] = (buf[i0 + 2] + buf[i0 + 5] + buf[i1 + 2]
-                          + buf[i1 + 5] + 2) >> 2
+            out[o + 1] = (buf[i0 + 1] + buf[i0 + 4] + buf[i1 + 1] + buf[i1 + 4] + 2) >> 2
+            out[o + 2] = (buf[i0 + 2] + buf[i0 + 5] + buf[i1 + 2] + buf[i1 + 5] + 2) >> 2
             o += 3
-    return out
+    return bytes(out)
 
 
-def _chunk(kind, data):
-    return (struct.pack(">I", len(data)) + kind + data +
-            struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
-
-
-def encode_png(rgb):
-    stride = W * 3
+def _png(w, h, rgb):
+    stride = w * 3
     raw = bytearray()
     prev = bytes(stride)
-    for y in range(H):
-        row = bytes(rgb[y * stride:(y + 1) * stride])
-        if y == 0:
-            raw.append(0)
-            raw += row
-        else:
-            raw.append(2)  # Up filter
-            raw += bytes((a - b) & 0xFF for a, b in zip(row, prev))
+    for y in range(h):
+        row = rgb[y * stride:(y + 1) * stride]
+        raw.append(2)  # Up filter (type 2)
+        raw += bytes((b - p) & 0xFF for b, p in zip(row, prev))
         prev = row
-    ihdr = struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0)
-    return (b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) +
-            _chunk(b"IDAT", zlib.compress(bytes(raw), 9)) +
-            _chunk(b"IEND", b""))
+    comp = zlib.compress(bytes(raw), 9)
+
+    def chunk(typ, data):
+        c = struct.pack(">I", len(data)) + typ + data
+        return c + struct.pack(">I", zlib.crc32(typ + data) & 0xFFFFFFFF)
+
+    png = bytearray(b"\x89PNG\r\n\x1a\n")
+    png += chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+    png += chunk(b"IDAT", comp)
+    png += chunk(b"IEND", b"")
+    return bytes(png)
 
 
-def render_png():
+def render():
+    """Render the scene; returns (width, height, rgb bytes) at 1024x1024."""
     rng = random.Random(SEED)
-    cv = Canvas()
-    paint_sky_sea(cv)
-    paint_stars(cv, rng)
-    paint_moon(cv, rng)
-    paint_moon_path(cv, rng)
-    paint_whale(cv, rng)
-    paint_spray_foam(cv, rng)
-    return encode_png(downsample(cv.buf))
+    buf = bytearray(W2 * H2 * 3)
+    _sky_and_sea(buf)
+    _stars(buf, rng)
+    _moon(buf, rng)
+    _moonlight_path(buf, rng)
+    _whale(buf, rng)
+    _spray_and_foam(buf, rng)
+    return W, H, _downsample(buf)
 
 
-if __name__ == "__main__":
-    import sys
-
-    path = sys.argv[1] if len(sys.argv) > 1 else "entry.png"
-    data = render_png()
-    with open(path, "wb") as f:
-        f.write(data)
-    print("wrote %s (%d bytes)" % (path, len(data)))
+def build_png():
+    w, h, rgb = render()
+    return _png(w, h, rgb)
