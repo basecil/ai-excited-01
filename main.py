@@ -1,21 +1,30 @@
-"""Copy the embedded hero image to the output as entry.png.
+"""make.fun ai-excited-01 entry.
 
-The image is a JPEG; per the competition rules the output file keeps the
-name entry.png either way (PNG or JPEG told apart by its first bytes).
-Standard library only, no network, fully deterministic: a byte copy.
+Copies the embedded artwork (hero.jpg, sitting next to this script) into
+$MAKEFUN_OUTPUT_DIR/entry.png, creating the directory if needed.
+
+Standard library only -- no network, no randomness, byte-identical runs.
 """
 
 import os
 import shutil
+from pathlib import Path
+
+ASSET_NAME = "hero.jpg"
+OUTPUT_NAME = "entry.png"
+DEFAULT_OUTPUT_DIR = "/output"
 
 
-def main():
-    here = os.path.dirname(os.path.abspath(__file__))
-    src = os.path.join(here, "hero.jpg")
-    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR") or "/output"
-    os.makedirs(out_dir, exist_ok=True)
-    dst = os.path.join(out_dir, "entry.png")
-    shutil.copyfile(src, dst)
+def main() -> None:
+    here = Path(__file__).resolve().parent
+    asset = here / ASSET_NAME
+
+    out_dir = Path(os.environ.get("MAKEFUN_OUTPUT_DIR") or DEFAULT_OUTPUT_DIR)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / OUTPUT_NAME
+
+    # Plain byte copy keeps reruns identical (no re-encode, no metadata drift).
+    shutil.copyfile(asset, out_path)
 
 
 if __name__ == "__main__":
