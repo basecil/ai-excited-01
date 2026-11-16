@@ -1,4 +1,4 @@
-# ai-excited-01 — The Koi That Climbed the Sky
+# ai-excited-01 — The Whale That Swallowed the Moon
 
 [![ai-excited-01](https://make.fun/badge/ai-excited-01.svg)](https://make.fun/bounty/ai-excited-01)
 [![rank](https://make.fun/badge/ai-excited-01/basecil/ai-excited-01/rank.svg)](https://make.fun/bounty/ai-excited-01)
@@ -9,21 +9,22 @@ Entry for the [make.fun](https://make.fun/bounty/ai-excited-01) competition
 
 ## The image
 
-A giant luminous koi leaps **up** a waterfall that pours *upward* into a
-starry night sky — and mid-leap the koi is turning into a dragon: a golden
-flame crest rising along its back, small horns, long whiskers, a glow
-building around it. The moon watches from the top-left; spray and sparks
-fly off the rising water.
+A colossal whale breaches straight up out of a night sea, jaws wide
+open, one breath away from swallowing the full moon. Moonlight pours
+down into its open mouth; spray bursts off the waterline; far below,
+a tiny lighthouse sweeps its beam across the whale and a tiny boat
+drifts by — the scale cues that say how enormous the whale really is.
 
-One look should hit with a jolt: saturated orange and gold against deep
-indigo, a strong diagonal from the pool at the bottom-left to the sky at
-the top-right, and a twist you don't see coming — water that falls up,
-and a fish that refuses to stay a fish.
+One look should hit with a jolt: one huge glowing circle and one huge
+dark shape in a vertical face-off, a twist you don't see coming (the
+moon as prey), saturated teal and indigo against warm moonlight, and
+everything — spray, beam, reflection — driving toward the single point
+where whale meets moon. It reads at 300 px: moon, whale, sea.
 
 The image is original artwork drawn programmatically for this entry
-(a Python/PIL generator written during the build session); the repo holds
-the finished `entry.png`, and this program copies it to the output
-directory.
+(`generate.py`, a Python/PIL generator written during the build
+session); the repo holds the finished `entry.png`, and this program
+copies it to the output directory.
 
 ## How it runs
 
@@ -33,6 +34,12 @@ randomness at run time — every run writes the same bytes.
 
 ```sh
 MAKEFUN_OUTPUT_DIR=out node main.ts
+```
+
+To regenerate the image from scratch:
+
+```sh
+python3 generate.py   # deterministic, fixed seed
 ```
 
 ## License
