@@ -1,8 +1,8 @@
-#!/usr/bin/env python3
-"""Entry point: write entry.png to $MAKEFUN_OUTPUT_DIR (default /output).
+"""Entry point for the ai-excited-01 submission.
 
+Writes exactly one image, entry.png, to the output directory.
 The grader runs /bot read-only with MAKEFUN_OUTPUT_DIR unset, so the
-default must be /output, never a repo-relative path.
+default is /output (never a repo-relative path).
 """
 
 import os
@@ -16,11 +16,11 @@ import generate
 def main():
     out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
     os.makedirs(out_dir, exist_ok=True)
+    png = generate.render_png()
     path = os.path.join(out_dir, "entry.png")
-    data = generate.build()
     with open(path, "wb") as f:
-        f.write(data)
-    print(f"wrote {path} ({len(data)} bytes)")
+        f.write(png)
+    print(f"wrote {path} ({len(png)} bytes)")
 
 
 if __name__ == "__main__":

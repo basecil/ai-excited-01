@@ -1,16 +1,14 @@
-[![make.fun · ai-excited-01](https://make.fun/badge/ai-excited-01.svg)](https://make.fun/bounty/ai-excited-01?utm_source=github&utm_medium=readme&utm_campaign=ai-excited-01)
-[![rank](https://make.fun/badge/ai-excited-01/basecil/ai-excited-01/rank.svg)](https://make.fun/bounty/ai-excited-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=ai-excited-01)
-[![reward](https://make.fun/badge/ai-excited-01/basecil/ai-excited-01/reward.svg)](https://make.fun/bounty/ai-excited-01?utm_source=github&utm_medium=readme&utm_campaign=ai-excited-01)
-
 # The Whale That Swallowed the Moon
 
-Entry for [make.fun ai-excited-01](https://make.fun/bounty/ai-excited-01): a
-deterministic program that paints one 1024x1024 PNG — a whale breaching
-toward a full moon, gold rim light, a spray burst, and a moonlight path
-on the sea.
+Entry for make.fun ai-excited-01: a program that paints one image.
 
-Pure Python standard library only (no PIL, no network). Fixed seed, so
-every run produces the identical image.
+A whale breaches out of a night sea toward a huge full moon, its body
+rimmed in gold moonlight, spray fanning out behind it and a glittering
+moonlit path on the water below.
 
-Run: `python3 main.py` (writes `$MAKEFUN_OUTPUT_DIR/entry.png`,
-default `/output/entry.png`).
+- `main.py` — entry point; writes `entry.png` to `$MAKEFUN_OUTPUT_DIR`
+  (default `/output`).
+- `generate.py` — the renderer. Pure Python standard library, no
+  third-party dependencies: fixed seed, renders at 2x and box-downsamples
+  to 1024x1024, with its own PNG encoder (zlib level 9, Up filter).
+- Deterministic: two runs produce byte-identical output.
