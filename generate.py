@@ -1,16 +1,12 @@
-"""The Whale That Swallowed the Moon.
+"""Renderer for "The Whale That Swallowed the Moon".
 
-A pure-standard-library renderer: draws a whale breaching out of a night
-sea to swallow the full moon, and encodes the result as a PNG.
+Pure standard library (math / random / struct / zlib) — the grader runs
+with nothing installed. The scene is painted at 2x resolution and box
+downsampled to 1024x1024, then encoded to PNG by hand.
 
-The grading sandbox runs Python with the standard library only, so every
-pixel here is computed with math, random, struct and zlib -- no Pillow,
-no numpy, no network. The scene is rendered at 2x and box-downsampled,
-which antialiases every edge without per-pixel distance fields.
-
-Deterministic: one fixed seed drives every random choice, the PNG encoder
-writes no timestamps, and zlib output is a pure function of its input, so
-two runs produce byte-identical files.
+Scene: a humpback breaches out of a night sea toward a huge full moon,
+its head crossing the moon's lower edge, gold rim light on its back,
+spray bursting where it leaves the water, a path of moonlight on the sea.
 """
 
 import math
@@ -19,514 +15,303 @@ import struct
 import zlib
 
 SEED = 4177
-
-# Final image size. The scene is drawn at SSx and downsampled.
+SS = 2  # supersample factor
 W, H = 1024, 1024
-SS = 2
 SW, SH = W * SS, H * SS
 
-HORIZON = 640 * SS  # the sea starts here (supersampled coordinates)
-MOON_C = (660 * SS, 270 * SS)
-MOON_R = 165 * SS
-
+# --- palette (final-pixel coordinates unless noted) -------------------------
 SKY_TOP = (2, 6, 23)
 SKY_HORIZON = (11, 30, 58)
 SEA_TOP = (13, 27, 51)
 SEA_BOTTOM = (4, 7, 15)
 MOON_CORE = (255, 251, 232)
 MOON_EDGE = (238, 214, 136)
-MOON_GLOW = (247, 224, 150)
-WHALE = (6, 13, 24)
-WHALE_BELLY = (26, 47, 71)
-RIM = (242, 212, 136)
-SPRAY = (234, 244, 255)
-GOLD = (247, 220, 138)
+MOON_X, MOON_Y, MOON_R = 660, 270, 165
+HORIZON = 640
+BODY = (36, 62, 108)        # whale, above the waterline
+BODY_DARK = (32, 54, 92)    # whale, submerged part
+BELLY = (120, 150, 195)     # pale belly patch
+RIM = (255, 212, 118)       # gold rim light
+RIM_DARK = (120, 92, 44)    # rim light under water
+FIN = (27, 47, 85)
+SPRAY = (228, 239, 250)
+FOAM = (212, 227, 243)
+GOLD = (255, 203, 100)
+
+# Whale spine: quadratic bezier, tail -> control -> head.
+TAIL = (360.0, 720.0)
+CTRL = (330.0, 480.0)
+HEAD = (628.0, 352.0)
 
 
-def lerp(a, b, t):
-    """Linear interpolation between two RGB colors."""
-    return tuple(int(round(a[i] + (b[i] - a[i]) * t)) for i in range(3))
+def mix(c1, c2, t):
+    """Linear blend between two RGB colors."""
+    return (
+        int(c1[0] + (c2[0] - c1[0]) * t),
+        int(c1[1] + (c2[1] - c1[1]) * t),
+        int(c1[2] + (c2[2] - c1[2]) * t),
+    )
 
 
-def blend(fg, bg, alpha):
-    """Alpha-composite fg (alpha 0..255) over bg; both RGB tuples."""
-    inv = 255 - alpha
-    return tuple((fg[i] * alpha + bg[i] * inv) // 255 for i in range(3))
+def bezier(t):
+    u = 1.0 - t
+    return (
+        u * u * TAIL[0] + 2.0 * u * t * CTRL[0] + t * t * HEAD[0],
+        u * u * TAIL[1] + 2.0 * u * t * CTRL[1] + t * t * HEAD[1],
+    )
+
+
+def body_radius(t):
+    """Radius profile: 18 at the tail, 95 mid-body, 44 at the head."""
+    if t <= 0.55:
+        return 18.0 + 77.0 * (t / 0.55) ** 0.8
+    return 95.0 - 51.0 * ((t - 0.55) / 0.45) ** 1.1
 
 
 class Canvas:
-    """An RGB bytearray with fast horizontal-span fills."""
+    """RGB bytearray canvas, drawn in final coordinates, stored at 2x."""
 
-    def __init__(self, w, h):
-        self.w = w
-        self.h = h
-        self.buf = bytearray(w * h * 3)
+    def __init__(self):
+        self.buf = bytearray(SW * SH * 3)
 
-    def hspan(self, y, x0, x1, color):
-        """Fill the solid horizontal span [x0, x1) on row y, clipped."""
-        if y < 0 or y >= self.h:
+    def _row_fill(self, sy, x0, x1, color):
+        """Fill supersampled row `sy` between pixel columns x0..x1."""
+        if x0 >= x1:
             return
-        x0 = max(0, int(x0))
-        x1 = min(self.w, int(x1))
-        if x1 <= x0:
-            return
-        n = x1 - x0
-        off = y * self.w * 3 + x0 * 3
-        self.buf[off:off + n * 3] = bytes(color) * n
+        start = (sy * SW + x0) * 3
+        self.buf[start:start + (x1 - x0) * 3] = bytes(color) * (x1 - x0)
 
-    def plot(self, x, y, color):
-        if 0 <= x < self.w and 0 <= y < self.h:
-            off = (y * self.w + x) * 3
-            self.buf[off:off + 3] = bytes(color)
+    def fill_rect(self, x0, y0, x1, y1, color):
+        sx0 = max(0, int(x0 * SS))
+        sx1 = min(SW, int(x1 * SS))
+        sy0 = max(0, int(y0 * SS))
+        sy1 = min(SH, int(y1 * SS))
+        for sy in range(sy0, sy1):
+            self._row_fill(sy, sx0, sx1, color)
 
-    def blend_plot(self, x, y, color, alpha):
-        if 0 <= x < self.w and 0 <= y < self.h:
-            off = (y * self.w + x) * 3
-            inv = 255 - alpha
-            b = self.buf
-            b[off] = (color[0] * alpha + b[off] * inv) // 255
-            b[off + 1] = (color[1] * alpha + b[off + 1] * inv) // 255
-            b[off + 2] = (color[2] * alpha + b[off + 2] * inv) // 255
-
-
-def circle_intervals(cx, cy, r, y):
-    """The x-interval [x0, x1) of circle (cx, cy, r) on row y, or None."""
-    dy = y - cy
-    if abs(dy) >= r:
-        return None
-    dx = int(math.sqrt(r * r - dy * dy))
-    return (cx - dx, cx + dx + 1)
-
-
-def fill_circle(cv, cx, cy, r, color):
-    for y in range(cy - r, cy + r + 1):
-        iv = circle_intervals(cx, cy, r, y)
-        if iv:
-            cv.hspan(y, iv[0], iv[1], color)
-
-
-def fill_circle_alpha(cv, cx, cy, r, color, alpha):
-    for y in range(cy - r, cy + r + 1):
-        iv = circle_intervals(cx, cy, r, y)
-        if iv:
-            for x in range(iv[0], iv[1]):
-                cv.blend_plot(x, y, color, alpha)
-
-
-def fill_polygon(cv, points, color):
-    """Scanline polygon fill (even-odd rule), for concave shapes too."""
-    ys = [p[1] for p in points]
-    y0, y1 = min(ys), max(ys)
-    n = len(points)
-    for y in range(y0, y1 + 1):
-        xs = []
-        for i in range(n):
-            x1, y1p = points[i]
-            x2, y2p = points[(i + 1) % n]
-            if (y1p <= y < y2p) or (y2p <= y < y1p):
-                t = (y - y1p) / (y2p - y1p)
-                xs.append(x1 + t * (x2 - x1))
-        xs.sort()
-        for j in range(0, len(xs) - 1, 2):
-            cv.hspan(y, int(xs[j]), int(xs[j + 1]) + 1, color)
-
-
-# ---------------------------------------------------------------- spine
-# The whale's backbone is a quadratic bezier from the tail stock, still
-# at the water, up to the head biting at the moon. The body is the union
-# of circles along it, fat in the middle, tapering to tail and snout.
-
-SPINE = ((360 * SS, 720 * SS), (330 * SS, 480 * SS), (628 * SS, 352 * SS))
-
-# Radius profile along the spine: (t, radius in supersampled pixels).
-SPINE_R = [(0.00, 36), (0.15, 90), (0.30, 140), (0.50, 175),
-           (0.70, 195), (0.85, 160), (0.95, 115), (1.00, 88)]
-
-
-def bezier(p0, c, p2, t):
-    u = 1.0 - t
-    return (u * u * p0[0] + 2 * u * t * c[0] + t * t * p2[0],
-            u * u * p0[1] + 2 * u * t * c[1] + t * t * p2[1])
-
-
-def spine_radius(t):
-    for i in range(len(SPINE_R) - 1):
-        t0, r0 = SPINE_R[i]
-        t1, r1 = SPINE_R[i + 1]
-        if t0 <= t <= t1:
-            f = (t - t0) / (t1 - t0)
-            return r0 + (r1 - r0) * f
-    return SPINE_R[-1][1]
-
-
-def body_intervals(spine, n=28):
-    """Union of circles along a spine -> {row: [(x0, x1), ...]} merged."""
-    rows = {}
-    for i in range(n + 1):
-        t = i / n
-        cx, cy = bezier(spine[0], spine[1], spine[2], t)
-        r = int(round(spine_radius(t)))
-        cx = int(round(cx))
-        cy = int(round(cy))
-        for y in range(cy - r, cy + r + 1):
-            iv = circle_intervals(cx, cy, r, y)
-            if iv:
-                rows.setdefault(y, []).append(iv)
-    for y, ivs in rows.items():
-        ivs.sort()
-        merged = []
-        for a, b in ivs:
-            if merged and a <= merged[-1][1]:
-                if b > merged[-1][1]:
-                    merged[-1] = (merged[-1][0], b)
-            else:
-                merged.append((a, b))
-        rows[y] = merged
-    return rows
-
-
-# ------------------------------------------------------------------ sky
-
-def sky_color(y):
-    return lerp(SKY_TOP, SKY_HORIZON, y / HORIZON)
-
-
-def sea_color(y):
-    return lerp(SEA_TOP, SEA_BOTTOM, (y - HORIZON) / (SH - HORIZON))
-
-
-def draw_sky(cv):
-    for y in range(HORIZON):
-        cv.hspan(y, 0, SW, sky_color(y))
-
-
-def draw_cloud(cv, cx, cy, a, b, color, alpha):
-    """A thin, dark, translucent elliptical streak (sky only)."""
-    for y in range(cy - b, cy + b + 1):
-        if y < 0 or y >= HORIZON:
-            continue
-        dy = (y - cy) / b
-        if abs(dy) >= 1:
-            continue
-        dx = int(a * math.sqrt(1 - dy * dy))
-        cv.hspan(y, cx - dx, cx + dx + 1, blend(color, sky_color(y), alpha))
-
-
-def draw_glow(cv):
-    """The moon's halo: concentric annuli, each a constant composite."""
-    cx, cy = MOON_C
-    r_out = MOON_R + 510
-    rings = 36
-    for k in range(rings):
-        r_outer = r_out - (r_out - MOON_R) * k / rings
-        r_inner = r_out - (r_out - MOON_R) * (k + 1) / rings
-        mid = (r_outer + r_inner) / 2
-        frac = (r_out - mid) / (r_out - MOON_R)
-        alpha = int(88 * frac ** 1.6)
-        if alpha <= 0:
-            continue
-        y0 = max(0, int(cy - r_outer))
-        y1 = min(SH - 1, int(cy + r_outer))
-        for y in range(y0, y1 + 1):
-            dy = y - cy
-            if abs(dy) >= r_outer:
+    def fill_circle(self, cx, cy, r, color):
+        scx, scy, sr = cx * SS, cy * SS, r * SS
+        sy0 = max(0, int(scy - sr))
+        sy1 = min(SH, int(scy + sr) + 1)
+        r2 = sr * sr
+        for sy in range(sy0, sy1):
+            dy = (sy + 0.5) - scy
+            rem = r2 - dy * dy
+            if rem <= 0:
                 continue
-            dx_o = math.sqrt(r_outer * r_outer - dy * dy)
-            if abs(dy) < r_inner:
-                dx_i = math.sqrt(r_inner * r_inner - dy * dy)
-            else:
-                dx_i = 0.0
-            base = sky_color(y) if y < HORIZON else sea_color(y)
-            col = blend(MOON_GLOW, base, alpha)
-            cv.hspan(y, int(cx - dx_o), int(cx - dx_i) + 1, col)
-            cv.hspan(y, int(cx + dx_i), int(cx + dx_o) + 1, col)
+            dx = math.sqrt(rem)
+            x0 = max(0, int(scx - dx))
+            x1 = min(SW, int(scx + dx) + 1)
+            self._row_fill(sy, x0, x1, color)
+
+    def fill_poly(self, points, color):
+        """Scanline polygon fill (final coordinates)."""
+        pts = [(x * SS, y * SS) for x, y in points]
+        ys = [p[1] for p in pts]
+        sy0 = max(0, int(min(ys)))
+        sy1 = min(SH, int(max(ys)) + 1)
+        n = len(pts)
+        for sy in range(sy0, sy1):
+            y = sy + 0.5
+            xs = []
+            for i in range(n):
+                x1, y1 = pts[i]
+                x2, y2 = pts[(i + 1) % n]
+                if (y1 <= y < y2) or (y2 <= y < y1):
+                    xs.append(x1 + (y - y1) * (x2 - x1) / (y2 - y1))
+            xs.sort()
+            for j in range(0, len(xs) - 1, 2):
+                self._row_fill(sy, max(0, int(xs[j])),
+                               min(SW, int(xs[j + 1]) + 1), color)
 
 
-# Moon radial gradient, precomputed by r^2 bucket (0 = centre, 1 = rim).
-def _moon_table():
-    table = []
-    for b in range(257):
-        f = b / 256
-        c = lerp(MOON_CORE, MOON_EDGE, f ** 1.4)
-        if f > 0.965:  # slight limb darkening at the very rim
-            c = blend((190, 175, 130), c, int(160 * (f - 0.965) / 0.035))
-        table.append(c)
-    return table
-
-
-MOON_TABLE = _moon_table()
-
-
-def draw_moon(cv):
-    cx, cy = MOON_C
-    r = MOON_R
-    r2max = r * r
-    for y in range(cy - r, cy + r + 1):
-        dy = y - cy
-        dy2 = dy * dy
-        if dy2 >= r2max:
-            continue
-        dx = int(math.sqrt(r2max - dy2))
-        off = (y * SW + (cx - dx)) * 3
-        for x in range(cx - dx, cx + dx + 1):
-            ddx = x - cx
-            b = (ddx * ddx + dy2) * 256 // r2max
-            cv.buf[off:off + 3] = bytes(MOON_TABLE[b])
-            off += 3
-
-
-def draw_craters(cv, rng):
-    cx, cy = MOON_C
-    r = MOON_R
-    for _ in range(16):
-        ang = rng.uniform(0, 2 * math.pi)
-        rr = r * 0.78 * math.sqrt(rng.random())
-        ccx = int(cx + rr * math.cos(ang))
-        ccy = int(cy + rr * math.sin(ang))
-        cr = rng.randint(10, 42)
-        d2 = (ccx - cx) ** 2 + (ccy - cy) ** 2
-        b = min(256, d2 * 256 // (r * r))
-        col = blend((217, 196, 138), MOON_TABLE[b], 70)
-        for y in range(ccy - cr, ccy + cr + 1):
-            iv = circle_intervals(ccx, ccy, cr, y)
-            moon_iv = circle_intervals(cx, cy, r, y)
-            if iv and moon_iv:
-                x0, x1 = max(iv[0], moon_iv[0]), min(iv[1], moon_iv[1])
-                if x1 > x0:
-                    cv.hspan(y, x0, x1, col)
-
-
-# ------------------------------------------------------------------ sea
-
-def draw_sea(cv):
-    for y in range(HORIZON, SH):
-        cv.hspan(y, 0, SW, sea_color(y))
-    # a band of moonlit haze right at the horizon
-    for y in range(HORIZON, HORIZON + 26):
-        t = 1 - (y - HORIZON) / 26
-        cv.hspan(y, 0, SW, blend((28, 58, 92), sea_color(y), int(70 * t)))
-
-
-def draw_moonlight(cv):
-    """The moon's golden path on the water, widening toward the viewer."""
-    cx = MOON_C[0]
-    strips = 8
-    for y in range(HORIZON + 4, SH):
-        depth = (y - HORIZON) / (SH - HORIZON)
-        hw = int(130 + depth * 260)
-        base = sea_color(y)
-        for s in range(strips):
-            f0 = s / strips
-            f1 = (s + 1) / strips
-            mid = (f0 + f1) / 2
-            alpha = int(64 * (math.cos(mid * math.pi / 2) ** 1.5)
-                        * (0.55 + 0.45 * depth))
-            if alpha <= 0:
-                continue
-            col = blend(GOLD, base, alpha)
-            cv.hspan(y, int(cx + f0 * hw), int(cx + f1 * hw), col)
-            cv.hspan(y, int(cx - f1 * hw), int(cx - f0 * hw), col)
-
-
-def draw_dashes(cv, rng):
-    """Glittering sparkles in the moon path, plus sparse wave streaks."""
-    cx = MOON_C[0]
-    for _ in range(420):
-        y = rng.randint(HORIZON + 6, SH - 8)
-        depth = (y - HORIZON) / (SH - HORIZON)
-        hw = int((130 + depth * 260) * (0.35 + 0.65 * rng.random()))
-        x = int(cx + rng.uniform(-hw, hw))
-        ln = rng.randint(12, 110)
-        br = rng.randint(120, 255)
-        col = (min(255, 200 + br // 3), min(255, 170 + br // 4),
-               90 + br // 3)
-        cv.hspan(y, x, x + ln, col)
-        if rng.random() < 0.5:
-            cv.hspan(y + 1, x, x + ln, col)
-    for _ in range(240):
-        y = rng.randint(HORIZON + 10, SH - 6)
-        x = rng.randint(0, SW - 160)
-        ln = rng.randint(20, 150)
-        cv.hspan(y, x, x + ln, lerp((16, 38, 66), (40, 80, 120),
-                                    rng.random()))
-    # a few dim sparkles on the open sea, left of the moon path
-    for _ in range(60):
-        y = rng.randint(HORIZON + 10, SH - 6)
-        x = rng.randint(0, 900)
-        ln = rng.randint(10, 60)
-        cv.hspan(y, x, x + ln, lerp((20, 44, 74), (60, 100, 140),
-                                    rng.random()))
-
-
-def draw_stars(cv, rng):
-    cx, cy = MOON_C
-    clear2 = (MOON_R + 260) ** 2  # keep the moon's glow clear of stars
-    for _ in range(280):
-        x = rng.randint(0, SW - 1)
-        y = rng.randint(0, HORIZON - 20)
-        if (x - cx) ** 2 + (y - cy) ** 2 < clear2:
-            continue
-        roll = rng.random()
-        if roll < 0.72:
-            cv.plot(x, y, (220, 230, 245))
-            if rng.random() < 0.4:
-                cv.plot(x + 1, y, (200, 214, 235))
-        elif roll < 0.94:
-            c = (235, 242, 255)
-            cv.plot(x, y, c)
-            cv.plot(x + 1, y, c)
-            cv.plot(x, y + 1, c)
-            cv.plot(x + 1, y + 1, c)
-            cv.plot(x - 1, y, (180, 195, 220))
-            cv.plot(x + 2, y, (180, 195, 220))
+def paint_sky_sea(cv):
+    for sy in range(SH):
+        y = sy / SS
+        if y < HORIZON:
+            c = mix(SKY_TOP, SKY_HORIZON, y / HORIZON)
         else:
-            # a bright star with a cross sparkle
-            c = (255, 255, 255)
-            arm = rng.randint(8, 18)
-            for d in range(-arm, arm + 1):
-                a = 255 - int(200 * abs(d) / arm)
-                cv.blend_plot(x + d, y, c, a)
-                cv.blend_plot(x, y + d, c, a)
-            cv.plot(x, y, c)
+            c = mix(SEA_TOP, SEA_BOTTOM, (y - HORIZON) / (H - HORIZON))
+        cv._row_fill(sy, 0, SW, c)
 
 
-# ---------------------------------------------------------------- whale
-
-def draw_whale(cv):
-    """Moonlit rim first (body shifted toward the moon), then the body."""
-    rim_spine = tuple((x + 34, y - 26) for x, y in SPINE)
-    for y, ivs in body_intervals(rim_spine).items():
-        for a, b in ivs:
-            cv.hspan(y, a, b, RIM)
-    rows = body_intervals(SPINE)
-    for y, ivs in rows.items():
-        for a, b in ivs:
-            cv.hspan(y, a, b, WHALE)
-    return rows
-
-
-def draw_belly(cv, body_rows):
-    """A lighter patch along the underside, clipped to the body."""
-    belly_spine = tuple((x - 30, y + 55) for x, y in SPINE)
-    for y, ivs in body_intervals(belly_spine).items():
-        if y not in body_rows:
-            continue
-        for a, b in ivs:
-            for c0, c1 in body_rows[y]:
-                x0, x1 = max(a, c0), min(b, c1)
-                if x1 > x0:
-                    cv.hspan(y, x0, x1, WHALE_BELLY)
+def paint_stars(cv, rng):
+    for _ in range(280):
+        x = rng.uniform(0, W)
+        y = rng.uniform(0, 615)
+        if math.hypot(x - MOON_X, y - MOON_Y) < 205:
+            continue  # clear zone around the moon
+        roll = rng.random()
+        if roll < 0.12:
+            r, c = 2.2, (255, 255, 255)
+        elif roll < 0.4:
+            r, c = 1.5, (222, 232, 248)
+        else:
+            r, c = 1.0, (190, 205, 230)
+        cv.fill_circle(x, y, r, c)
 
 
-def draw_flukes(cv):
-    fluke = [(720, 1470), (430, 1300), (560, 1405), (720, 1385),
-             (880, 1405), (1010, 1310), (720, 1470)]
-    rim = [(x, y - 12) for x, y in fluke]
-    fill_polygon(cv, rim, RIM)
-    fill_polygon(cv, fluke, WHALE)
+def paint_moon(cv, rng):
+    sky_here = mix(SKY_TOP, SKY_HORIZON, MOON_Y / HORIZON)
+    # 36-ring glow halo, faintest ring outermost.
+    for i in range(36, 0, -1):
+        t = (36 - i) / 35.0
+        cv.fill_circle(MOON_X, MOON_Y, MOON_R + i * 2.5,
+                       mix(sky_here, MOON_EDGE, 0.03 + 0.30 * t))
+    # Disc: concentric rings, edge color outside, pale core inside.
+    steps = 24
+    for i in range(steps, -1, -1):
+        r = MOON_R * (i + 1) / (steps + 1)
+        cv.fill_circle(MOON_X, MOON_Y, r,
+                       mix(MOON_EDGE, MOON_CORE, 1.0 - r / (MOON_R + 1)))
+    # 16 craters.
+    for _ in range(16):
+        while True:
+            x = rng.uniform(MOON_X - 140, MOON_X + 140)
+            y = rng.uniform(MOON_Y - 140, MOON_Y + 140)
+            if math.hypot(x - MOON_X, y - MOON_Y) < 135:
+                break
+        cv.fill_circle(x, y, rng.uniform(4, 14), (206, 186, 116))
 
 
-def draw_fin(cv):
-    fin = [(790, 1020), (560, 1410), (660, 1435), (850, 1120)]
-    fill_polygon(cv, fin, WHALE)
+def paint_moon_path(cv, rng):
+    def half_width(y):
+        d = (y - HORIZON) / (H - HORIZON)
+        return 30.0 + 130.0 * d
+
+    # 8 gold strips, widening with depth.
+    for y in (660, 700, 745, 795, 850, 905, 960, 1005):
+        hw = half_width(y) * 0.85
+        x = MOON_X - hw + rng.uniform(-10, 10)
+        end = MOON_X + hw
+        while x < end:
+            seg = rng.uniform(18, 60)
+            cv.fill_rect(x, y, min(x + seg, end), y + rng.uniform(4, 8),
+                         (200, 158, 70))
+            x += seg + rng.uniform(8, 30)
+    # 420 sparkle dashes inside the wedge.
+    for _ in range(420):
+        y = rng.uniform(HORIZON + 5, H - 4)
+        hw = half_width(y)
+        x = rng.uniform(MOON_X - hw, MOON_X + hw)
+        cv.fill_rect(x, y, x + rng.uniform(2, 7), y + rng.uniform(1, 2),
+                     (255, 214, 120) if rng.random() < 0.5 else (232, 190, 92))
 
 
-def draw_eye(cv):
-    fill_circle(cv, 1280, 660, 10, (223, 233, 245))
-    fill_circle(cv, 1282, 662, 5, (10, 16, 28))
+def paint_whale(cv, rng):
+    spine = [(bezier(i / 28.0), body_radius(i / 28.0)) for i in range(29)]
+
+    # Gold rim: same body shifted up-right, drawn first.
+    for (x, y), r in spine:
+        rim = RIM if y <= HORIZON else RIM_DARK
+        cv.fill_circle(x + 17, y - 13, r, rim)
+    # Body, two-tone across the waterline.
+    for (x, y), r in spine:
+        cv.fill_circle(x, y, r, BODY if y <= HORIZON else BODY_DARK)
+    # Belly: smaller circles hugging the lower side of the body.
+    for i in range(9, 23):
+        (x, y), r = spine[i]
+        cv.fill_circle(x, y + r * 0.30, r * 0.42, BELLY)
+
+    # Flukes: concave polygon at the tail, gold rim on the top edge.
+    flukes = [(280, 690), (330, 706), (360, 716), (390, 706), (440, 690),
+              (405, 672), (360, 684), (315, 672)]
+    gold = [(x, y - 3) for x, y in flukes]
+    cv.fill_poly(gold, RIM_DARK)
+    cv.fill_poly(flukes, BODY_DARK)
+
+    # Pectoral fin: tapered polygon on the body's lower side.
+    cv.fill_poly([(375, 545), (330, 620), (312, 668), (360, 650),
+                  (415, 590)], FIN)
+
+    # Eye: pale dot + dark pupil on the head.
+    cv.fill_circle(612, 332, 7, (235, 240, 248))
+    cv.fill_circle(612, 332, 3.5, (8, 12, 24))
 
 
-def draw_spray(cv, rng):
-    # the burst where the whale left the water: an upward fan
+def paint_spray_foam(cv, rng):
+    bx, by = 360.0, HORIZON  # breach point
+    # 320 droplets in an upward fan at the breach.
     for _ in range(320):
-        ang = rng.uniform(-math.pi * 0.95, -math.pi * 0.05)
-        dist = rng.uniform(20, 360) * (0.4 + 0.6 * rng.random())
-        x = int(720 + dist * math.cos(ang) * 1.4)
-        y = int(1300 + dist * math.sin(ang))
-        fill_circle_alpha(cv, x, y, rng.randint(2, 6), SPRAY,
-                          rng.randint(140, 255))
-    # water sheeting off the rising body's trailing edge
+        ang = math.radians(rng.uniform(-165, -15))
+        dist = rng.uniform(8, 190) * rng.random() ** 0.5
+        x = bx + math.cos(ang) * dist
+        y = by + math.sin(ang) * dist + dist * dist * 0.0016
+        cv.fill_circle(x, y, rng.uniform(1.0, 3.0), SPRAY)
+    # 70 sheeting droplets along the trailing edge near the waterline.
     for _ in range(70):
-        t = rng.random()
-        sx, sy = bezier(SPINE[0], SPINE[1], SPINE[2], t)
-        nx = int(sx + rng.uniform(-200, 40))
-        ny = int(sy + rng.uniform(30, 160))
-        fill_circle_alpha(cv, nx, ny, rng.randint(1, 4), SPRAY,
-                          rng.randint(90, 170))
-
-
-def draw_foam(cv, rng):
+        t = rng.uniform(0.05, 0.35)
+        (x, y), r = bezier(t), body_radius(t)
+        x += rng.uniform(-r - 22, -r - 4)
+        y += rng.uniform(-14, 26)
+        cv.fill_circle(x, y, rng.uniform(1.0, 2.5), SPRAY)
+    # 30 foam blobs at the waterline.
     for _ in range(30):
-        x = int(rng.gauss(720, 190))
-        y = int(HORIZON + rng.gauss(30, 26))
-        fill_circle_alpha(cv, x, y, rng.randint(6, 22), SPRAY,
-                          rng.randint(130, 210))
+        cv.fill_circle(rng.uniform(290, 440), rng.uniform(632, 652),
+                       rng.uniform(2, 7), FOAM)
 
 
-# ------------------------------------------------------------- encoding
-
-def downsample(cv):
-    """Box-average the 2x canvas down to the final size."""
+def downsample(buf):
+    """Box-average the 2x buffer down to 1024x1024."""
     out = bytearray(W * H * 3)
-    src = cv.buf
+    sw3 = SW * 3
     for y in range(H):
-        s0 = (y * 2) * SW * 3
-        s1 = (y * 2 + 1) * SW * 3
-        d0 = y * W * 3
+        base0 = (2 * y) * sw3
+        base1 = base0 + sw3
+        o = y * W * 3
         for x in range(W):
-            o = d0 + x * 3
-            i0 = s0 + x * 6
-            i1 = s1 + x * 6
-            out[o] = (src[i0] + src[i0 + 3] + src[i1] + src[i1 + 3]) // 4
-            out[o + 1] = (src[i0 + 1] + src[i0 + 4] + src[i1 + 1]
-                          + src[i1 + 4]) // 4
-            out[o + 2] = (src[i0 + 2] + src[i0 + 5] + src[i1 + 2]
-                          + src[i1 + 5]) // 4
-    return bytes(out)
+            i0 = base0 + x * 6
+            i1 = base1 + x * 6
+            out[o] = (buf[i0] + buf[i0 + 3] + buf[i1] + buf[i1 + 3] + 2) >> 2
+            out[o + 1] = (buf[i0 + 1] + buf[i0 + 4] + buf[i1 + 1]
+                          + buf[i1 + 4] + 2) >> 2
+            out[o + 2] = (buf[i0 + 2] + buf[i0 + 5] + buf[i1 + 2]
+                          + buf[i1 + 5] + 2) >> 2
+            o += 3
+    return out
 
 
-def _chunk(typ, data):
-    c = struct.pack(">I", len(data)) + typ + data
-    return c + struct.pack(">I", zlib.crc32(typ + data) & 0xFFFFFFFF)
+def _chunk(kind, data):
+    return (struct.pack(">I", len(data)) + kind + data +
+            struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
 
 
-def encode_png(rgb, w=W, h=H):
-    """Encode raw RGB bytes as a PNG (Up filter, zlib level 9)."""
-    stride = w * 3
+def encode_png(rgb):
+    stride = W * 3
     raw = bytearray()
     prev = bytes(stride)
-    for y in range(h):
-        row = rgb[y * stride:(y + 1) * stride]
-        raw.append(2)  # Up filter
-        raw += bytes((row[i] - prev[i]) & 0xFF for i in range(stride))
+    for y in range(H):
+        row = bytes(rgb[y * stride:(y + 1) * stride])
+        if y == 0:
+            raw.append(0)
+            raw += row
+        else:
+            raw.append(2)  # Up filter
+            raw += bytes((a - b) & 0xFF for a, b in zip(row, prev))
         prev = row
-    comp = zlib.compress(bytes(raw), 9)
-    png = b"\x89PNG\r\n\x1a\n"
-    png += _chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
-    png += _chunk(b"IDAT", comp)
-    png += _chunk(b"IEND", b"")
-    return png
+    ihdr = struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) +
+            _chunk(b"IDAT", zlib.compress(bytes(raw), 9)) +
+            _chunk(b"IEND", b""))
 
 
-def render():
-    """Draw the scene and return the finished PNG bytes."""
+def render_png():
     rng = random.Random(SEED)
-    cv = Canvas(SW, SH)
-    draw_sky(cv)
-    draw_sea(cv)
-    draw_cloud(cv, 420, 210, 420, 34, (4, 10, 28), 70)
-    draw_cloud(cv, 1620, 880, 360, 26, (4, 10, 28), 55)
-    draw_glow(cv)
-    draw_moon(cv)
-    draw_craters(cv, rng)
-    draw_moonlight(cv)
-    draw_dashes(cv, rng)
-    draw_stars(cv, rng)
-    body_rows = draw_whale(cv)
-    draw_belly(cv, body_rows)
-    draw_flukes(cv)
-    draw_fin(cv)
-    draw_eye(cv)
-    draw_spray(cv, rng)
-    draw_foam(cv, rng)
-    return encode_png(downsample(cv))
+    cv = Canvas()
+    paint_sky_sea(cv)
+    paint_stars(cv, rng)
+    paint_moon(cv, rng)
+    paint_moon_path(cv, rng)
+    paint_whale(cv, rng)
+    paint_spray_foam(cv, rng)
+    return encode_png(downsample(cv.buf))
+
+
+if __name__ == "__main__":
+    import sys
+
+    path = sys.argv[1] if len(sys.argv) > 1 else "entry.png"
+    data = render_png()
+    with open(path, "wb") as f:
+        f.write(data)
+    print("wrote %s (%d bytes)" % (path, len(data)))

@@ -1,8 +1,8 @@
-"""Entry point for ai-excited-01: The Whale That Swallowed the Moon.
+"""Entrypoint: render the entry image to $MAKEFUN_OUTPUT_DIR/entry.png.
 
-Writes one image to /output/entry.png (or $MAKEFUN_OUTPUT_DIR/entry.png
-for local runs). Standard library only: the renderer in generate.py draws
-every pixel with math, random, struct and zlib.
+Output defaults to /output (the grader runs /bot read-only with
+MAKEFUN_OUTPUT_DIR unset, so a repo-relative default would fail).
+Pure standard library only.
 """
 
 import os
@@ -14,13 +14,13 @@ import generate
 
 
 def main():
-    outdir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
-    os.makedirs(outdir, exist_ok=True)
-    png = generate.render()
-    path = os.path.join(outdir, "entry.png")
+    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR") or "/output"
+    os.makedirs(out_dir, exist_ok=True)
+    png = generate.render_png()
+    path = os.path.join(out_dir, "entry.png")
     with open(path, "wb") as f:
         f.write(png)
-    print(f"wrote {path} ({len(png)} bytes)")
+    print("wrote %s (%d bytes)" % (path, len(png)))
 
 
 if __name__ == "__main__":
