@@ -1,23 +1,21 @@
-#!/usr/bin/env python3
-"""The Whale That Broke the Skyscraper — ai-excited-01 entry.
+"""Copy the embedded hero image to the output as entry.png.
 
-Copies the embedded hero image to the output directory as entry.png.
-Standard library only; no network access; fully deterministic.
+The image is a JPEG; per the competition rules the output file keeps the
+name entry.png either way (PNG or JPEG told apart by its first bytes).
+Standard library only, no network, fully deterministic: a byte copy.
 """
 
 import os
 import shutil
-from pathlib import Path
 
 
-def main() -> None:
-    here = Path(__file__).resolve().parent
-    src = here / "hero.jpg"
-    out_dir = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
-    out_dir.mkdir(parents=True, exist_ok=True)
-    dest = out_dir / "entry.png"
-    shutil.copyfile(src, dest)
-    print(f"wrote {dest} ({dest.stat().st_size} bytes)")
+def main():
+    here = os.path.dirname(os.path.abspath(__file__))
+    src = os.path.join(here, "hero.jpg")
+    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR") or "/output"
+    os.makedirs(out_dir, exist_ok=True)
+    dst = os.path.join(out_dir, "entry.png")
+    shutil.copyfile(src, dst)
 
 
 if __name__ == "__main__":
