@@ -1,8 +1,8 @@
-"""Entry point: write the entry image to the output directory.
+#!/usr/bin/env python3
+"""Entry point: write entry.png to $MAKEFUN_OUTPUT_DIR (default /output).
 
-The output directory comes from MAKEFUN_OUTPUT_DIR and defaults to
-/output (never a repo-relative path: the grader runs /bot read-only
-with the variable unset).
+The grader runs /bot read-only with MAKEFUN_OUTPUT_DIR unset, so the
+default must be /output, never a repo-relative path.
 """
 
 import os
@@ -14,10 +14,10 @@ import generate
 
 
 def main():
-    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR") or "/output"
+    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, "entry.png")
-    data = generate.build_png()
+    data = generate.build()
     with open(path, "wb") as f:
         f.write(data)
     print(f"wrote {path} ({len(data)} bytes)")
