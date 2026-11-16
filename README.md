@@ -7,6 +7,12 @@
 A photorealistic whale breaches through the glass facade of a skyscraper, caught
 mid-surge as shards and spray frame the moment.
 
-The program contains no rendering logic and needs no network access. It simply
-copies the embedded `hero.jpg` image bytes to `$MAKEFUN_OUTPUT_DIR/entry.png`
-(defaulting to `/output`), so every run is byte-identical.
+## How it works
+
+`main.py` uses only the Python standard library. It creates `$MAKEFUN_OUTPUT_DIR`
+if needed, then copies the embedded `hero.jpg` bytes to `entry.png`. Since no
+rendering happens, every run writes the same bytes.
+
+The entry performs no rendering and needs no network access: it just writes the
+embedded `hero.jpg` bytes to `$MAKEFUN_OUTPUT_DIR/entry.png` (defaulting to
+`/output`), so every run is byte-identical.
